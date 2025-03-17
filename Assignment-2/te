@@ -1,1 +1,290 @@
+/*******************************************************
+ * Title: Realistic Spheres with Enhanced Reflections & Shadows
+ * Author: ChatGPT Example
+ *
+ * - Adds specular highlights for more realistic shading.
+ * - Moves the left large mirror sphere further away from the center.
+ * - Uses three bounces (primary + 2 reflections) for more reflections.
+ *******************************************************/
+
+// Increase bounce count for extra reflections.
+#define NUM_SMALL  200
+#define MAX_BOUNCES 3  
+
+struct Sphere {
+    vec3  center;
+    float radius;
+    vec3  color;
+    float metallic;  // 1.0 = mirror-like, 0.0 = diffuse
+};
+
+Sphere spheres[NUM_SMALL + 3];
+
+// ----------------------------------------------
+// Random generator for sphere positions/colors
+// ----------------------------------------------
+
+uint rngSeed = 0u;
+uint randu() {
+    rngSeed ^= rngSeed << 13;
+    rngSeed ^= rngSeed >> 17;
+    rngSeed ^= rngSeed << 5;
+    return rngSeed;
+}
+float randf() {
+    return float(randu())*(1.0/4294967296.0);
+}
+
+// Generate a random small sphere.
+Sphere genSmallSphere()
+{
+    float range = 15.0;
+    float rx = randf() * (2.0*range) - range;
+    float rz = randf() * (2.0*range) - range;
+    
+    Sphere s;
+    s.center   = vec3(rx, 0.2, rz);
+    s.radius   = 0.2;
+    s.color    = vec3(randf(), randf(), randf());
+    s.metallic = 0.0; // small spheres are diffuse.
+    return s;
+}
+
+// ----------------------------------------------
+// Scene initialization
+// ----------------------------------------------
+
+void initScene()
+{
+    rngSeed = 2025u;
+    
+    // Large sphere #0 (mirror) – moved further left from center.
+    spheres[0].center   = vec3(-2.0, 1.0, 0.0);
+    spheres[0].radius   = 1.0;
+    spheres[0].color    = vec3(0.9);
+    spheres[0].metallic = 1.0;
+    
+    // Large sphere #1 (diffuse, brownish) in the center.
+    spheres[1].center   = vec3(0.0, 1.0, 0.0);
+    spheres[1].radius   = 1.0;
+    spheres[1].color    = vec3(0.8, 0.4, 0.2);
+    spheres[1].metallic = 0.0;
+    
+    // Large sphere #2 (mirror) on the right.
+    spheres[2].center   = vec3(1.5, 1.0, 0.0);
+    spheres[2].radius   = 1.0;
+    spheres[2].color    = vec3(0.9);
+    spheres[2].metallic = 1.0;
+    
+    // Many small diffuse spheres.
+    for(int i = 0; i < NUM_SMALL; i++)
+    {
+        spheres[i + 3] = genSmallSphere();
+    }
+}
+
+// ----------------------------------------------
+// Ray-plane intersection (y=0 floor)
+// ----------------------------------------------
+
+float intersectPlane(vec3 ro, vec3 rd)
+{
+    if (abs(rd.y) < 1e-6) return 1e9;
+    float t = -ro.y / rd.y;
+    return (t > 0.0) ? t : 1e9;
+}
+
+// ----------------------------------------------
+// Ray-sphere intersection
+// ----------------------------------------------
+
+float intersectSphere(vec3 ro, vec3 rd, vec3 center, float radius)
+{
+    vec3 oc = ro - center;
+    float b = dot(oc, rd);
+    float c = dot(oc, oc) - radius * radius;
+    float disc = b*b - c;
+    if (disc < 0.0) return 1e9;
+    float sdisc = sqrt(disc);
+    float t1 = -b - sdisc;
+    float t2 = -b + sdisc;
+    float tHit = (t1 > 0.0) ? t1 : ((t2 > 0.0) ? t2 : 1e9);
+    return tHit;
+}
+
+// ----------------------------------------------
+// Hit info structure
+// ----------------------------------------------
+
+struct Hit {
+    float tMin;
+    int   hitID;    // -1 indicates the plane.
+    vec3  pos;
+    vec3  nor;
+    vec3  color;
+    float metallic;
+};
+
+// ----------------------------------------------
+// Find the closest object intersection
+// ----------------------------------------------
+
+Hit getSceneHit(vec3 ro, vec3 rd)
+{
+    Hit h;
+    h.tMin     = 1e9;
+    h.hitID    = 999;
+    h.pos      = vec3(0.0);
+    h.nor      = vec3(0.0);
+    h.color    = vec3(0.0);
+    h.metallic = 0.0;
+    
+    // Check plane (floor at y = 0)
+    float tPlane = intersectPlane(ro, rd);
+    if (tPlane < h.tMin) {
+        h.tMin  = tPlane;
+        h.hitID = -1;
+    }
+    
+    // Check all spheres.
+    for (int i = 0; i < NUM_SMALL + 3; i++)
+    {
+        float tSph = intersectSphere(ro, rd, spheres[i].center, spheres[i].radius);
+        if (tSph < h.tMin) {
+            h.tMin  = tSph;
+            h.hitID = i;
+        }
+    }
+    
+    if (h.tMin < 1e9)
+    {
+        h.pos = ro + rd * h.tMin;
+        if (h.hitID == -1)
+        {
+            // Floor (gray).
+            h.nor      = vec3(0.0, 1.0, 0.0);
+            h.color    = vec3(0.5);
+            h.metallic = 0.0;
+        }
+        else
+        {
+            Sphere sp = spheres[h.hitID];
+            h.nor      = normalize(h.pos - sp.center);
+            h.color    = sp.color;
+            h.metallic = sp.metallic;
+        }
+    }
+    
+    return h;
+}
+
+// ----------------------------------------------
+// Compute lighting with shadows and specular highlights.
+// 'rd' is the incoming ray direction for computing view direction.
+vec3 computeLighting(Hit h, vec3 rd)
+{
+    vec3 lightDir = normalize(vec3(0.3, 1.0, 0.2));
+    
+    // Ambient term.
+    vec3 ambient = vec3(0.2);
+    
+    // Cast a shadow ray.
+    float shadow = 1.0;
+    vec3 shadowOrigin = h.pos + h.nor * 0.001;
+    Hit shadowHit = getSceneHit(shadowOrigin, lightDir);
+    if (shadowHit.tMin < 99999.0) {
+        shadow = 0.0;
+    }
+    
+    // Diffuse (Lambertian).
+    float diff = shadow * max(dot(h.nor, lightDir), 0.0);
+    vec3 diffuse = diff * vec3(1.0);
+    
+    // Specular highlight (Blinn–Phong).
+    vec3 viewDir = normalize(-rd);
+    vec3 halfDir = normalize(lightDir + viewDir);
+    float spec = shadow * pow(max(dot(h.nor, halfDir), 0.0), 32.0);
+    // Only add specular on non-metallic surfaces.
+    float specularStrength = 0.5 * (1.0 - h.metallic);
+    vec3 specular = specularStrength * spec * vec3(1.0);
+    
+    return h.color * (ambient + diffuse) + specular;
+}
+
+// ----------------------------------------------
+// Trace function (iterative reflections)
+// ----------------------------------------------
+
+vec3 traceRay(vec3 ro, vec3 rd)
+{
+    vec3 finalColor  = vec3(0.0);
+    vec3 attenuation = vec3(1.0);
+    
+    for (int b = 0; b < MAX_BOUNCES; b++)
+    {
+        Hit h = getSceneHit(ro, rd);
+        if (h.tMin > 99999.0)
+        {
+            // Sky color.
+            vec3 sky = vec3(0.6, 0.7, 1.0);
+            finalColor += attenuation * sky;
+            break;
+        }
+        
+        // Compute local lighting with our updated specular.
+        vec3 localColor = computeLighting(h, rd);
+        finalColor += attenuation * localColor;
+        
+        // If the material is metallic, reflect.
+        if (h.metallic > 0.5)
+        {
+            rd = reflect(rd, h.nor);
+            ro = h.pos + 0.001 * h.nor;
+            attenuation *= 0.9;
+        }
+        else
+        {
+            break;
+        }
+    }
+    
+    return finalColor;
+}
+
+// ----------------------------------------------
+// Camera setup
+// ----------------------------------------------
+
+vec3 getRayDir(vec2 fragCoord, vec2 resolution)
+{
+    vec2 uv = (fragCoord - 0.5 * resolution) / resolution.y;
+    vec3 forward = normalize(vec3(0.0, -0.3, -1.0));
+    vec3 right   = normalize(cross(forward, vec3(0, 1, 0)));
+    vec3 up      = cross(right, forward);
+    float fov    = 2.0;
+    vec3 rd = normalize(uv.x * right * fov + uv.y * up * fov + forward);
+    return rd;
+}
+
+// ----------------------------------------------
+// mainImage entry point
+// ----------------------------------------------
+
+bool inited = false;
+void mainImage(out vec4 fragColor, in vec2 fragCoord)
+{
+    if (!inited)
+    {
+        initScene();
+        inited = true;
+    }
+    
+    vec3 ro = vec3(0.0, 2.0, 6.0);
+    vec3 rd = getRayDir(fragCoord, iResolution.xy);
+    
+    vec3 col = traceRay(ro, rd);
+    col = pow(col, vec3(0.4545)); // Gamma correction.
+    
+    fragColor = vec4(col, 1.0);
+}
 
